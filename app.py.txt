@@ -1,0 +1,112 @@
+import streamlit as st
+import pandas as pd
+from PIL import Image
+import pytesseract
+import re
+
+# Set up the page
+st.set_page_config(page_title="Roofing Job Cost Tracker", layout="wide")
+
+st.title("Roofing Job Cost Tracker")
+st.markdown("Upload receipts to track Materials, Equipment, and Labor.")
+
+# --- SIDEBAR: JOB SELECTION ---
+with st.sidebar:
+    st.header("Job Details")
+    job_name = st.text_input("Job Name", placeholder="e.g., Argyle Elementary")
+    current_budget = st.number_input("Total Budget", min_value=0.0, step=1000.0)
+
+# --- HELPER FUNCTION: PARSE RECEIPT ---
+def extract_info(image):
+    # Use Tesseract OCR to convert image to string
+    text = pytesseract.image_to_string(image)
+    
+    # 1. Attempt to find Total Amount (looks for patterns like $123.45 or 123.45)
+    # This regex looks for the largest dollar amount found in the text
+    amounts = re.findall(r'\$?\d{1,3}(?:,\d{3})*(?:\.\d{2})', text)
+    if amounts:
+        # Clean up strings and convert to floats to find the max value (usually the total)
+        clean_amounts = [float(a.replace('$', '').replace(',', '')) for a in amounts]
+        detected_total = max(clean_amounts)
+    else:
+        detected_total = 0.0
+        
+    # 2. Attempt to Categorize based on keywords
+    text_lower = text.lower()
+    category = "Uncategorized"
+    
+    # Custom keywords for your trade
+    materials_keywords = ['tpo', 'iso', 'insulation', 'adhesive', 'membrane', 'fasteners', 'plates', 'roll', 'metal', 'flashing']
+    equipment_keywords = ['rental', 'crane', 'lift', 'dumpster', 'disposal', 'fuel', 'ladder']
+    labor_keywords = ['hours', 'labor', 'subcontractor', 'crew', 'payroll', 'service']
+
+    if any(k in text_lower for k in materials_keywords):
+        category = "Materials"
+    elif any(k in text_lower for k in equipment_keywords):
+        category = "Equipment"
+    elif any(k in text_lower for k in labor_keywords):
+        category = "Labor"
+        
+    return detected_total, category, text
+
+# --- MAIN INTERFACE ---
+col1, col2 = st.columns([1, 2])
+
+# Initialize session state for data storage
+if 'expenses' not in st.session_state:
+    st.session_state.expenses = pd.DataFrame(columns=["Category", "Item/Description", "Amount"])
+
+with col1:
+    st.subheader("Add New Receipt")
+    uploaded_file = st.file_uploader("Drag and drop receipt/screenshot", type=['png', 'jpg', 'jpeg'])
+    
+    if uploaded_file is not None:
+        image = Image.open(uploaded_file)
+        st.image(image, caption='Uploaded Receipt', use_column_width=True)
+        
+        # Auto-extraction
+        detected_total, suggested_category, raw_text = extract_info(image)
+        
+        with st.form("expense_form"):
+            st.info(f"Detected Total: ${detected_total}")
+            
+            # User Input Fields (Pre-filled where possible)
+            amount = st.number_input("Amount ($)", value=detected_total, step=0.01)
+            category = st.selectbox("Category", ["Materials", "Equipment", "Labor"], index=["Materials", "Equipment", "Labor"].index(suggested_category) if suggested_category in ["Materials", "Equipment", "Labor"] else 0)
+            description = st.text_input("Description", placeholder="e.g., 20 rolls of TPO")
+            
+            submitted = st.form_submit_button("Add Expense")
+            
+            if submitted:
+                new_row = pd.DataFrame({"Category": [category], "Item/Description": [description], "Amount": [amount]})
+                st.session_state.expenses = pd.concat([st.session_state.expenses, new_row], ignore_index=True)
+                st.success("Expense Added!")
+
+with col2:
+    st.subheader(f"Job Summary: {job_name}")
+    
+    if not st.session_state.expenses.empty:
+        # Show the Data Table
+        st.dataframe(st.session_state.expenses, use_container_width=True)
+        
+        # Calculate Totals
+        total_cost = st.session_state.expenses['Amount'].sum()
+        breakdown = st.session_state.expenses.groupby("Category")['Amount'].sum()
+        
+        # Metrics Row
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Cost", f"${total_cost:,.2f}")
+        m2.metric("Materials", f"${breakdown.get('Materials', 0):,.2f}")
+        m3.metric("Equipment", f"${breakdown.get('Equipment', 0):,.2f}")
+        m4.metric("Labor", f"${breakdown.get('Labor', 0):,.2f}")
+        
+        # Budget Bar
+        if current_budget > 0:
+            percent_used = (total_cost / current_budget)
+            st.progress(min(percent_used, 1.0), text=f"Budget Used: {percent_used:.1%}")
+            
+        # Download Data
+        csv = st.session_state.expenses.to_csv(index=False).encode('utf-8')
+        st.download_button("Download CSV Report", csv, "job_costing.csv", "text/csv")
+    else:
+        st.info("Upload a receipt to begin tracking.")
